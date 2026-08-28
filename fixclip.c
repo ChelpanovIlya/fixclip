@@ -27,6 +27,7 @@ static volatile sig_atomic_t running = 1;
 static unsigned char *primary_data = NULL;
 static unsigned long primary_len = 0;
 static int verbose = 0;
+static char pidfile_path[256];
 
 enum sync_state {
     STATE_IDLE,
@@ -248,16 +249,100 @@ static void handle_selection_request(XSelectionRequestEvent *req) {
     XSendEvent(dpy, req->requestor, False, NoEventMask, &reply);
 }
 
+static void make_pidfile_path(void) {
+    const char *runtime = getenv("XDG_RUNTIME_DIR");
+    if (runtime) {
+        snprintf(pidfile_path, sizeof(pidfile_path), "%s/fixclip.pid", runtime);
+    } else {
+        snprintf(pidfile_path, sizeof(pidfile_path), "/tmp/fixclip-%d.pid", getuid());
+    }
+}
+
+static void remove_pidfile(void) {
+    if (pidfile_path[0])
+        unlink(pidfile_path);
+}
+
+static void kill_old_instance(void) {
+    if (!pidfile_path[0]) return;
+
+    FILE *f = fopen(pidfile_path, "r");
+    if (!f) return;
+
+    pid_t old_pid;
+    if (fscanf(f, "%d", &old_pid) != 1) {
+        fclose(f);
+        unlink(pidfile_path);
+        return;
+    }
+    fclose(f);
+
+    if (old_pid <= 0 || old_pid == getpid()) {
+        unlink(pidfile_path);
+        return;
+    }
+
+    if (kill(old_pid, 0) == 0) {
+        logmsg("killing previous instance (pid %d)", old_pid);
+        kill(old_pid, SIGTERM);
+
+        for (int i = 0; i < 30; i++) {
+            usleep(100000);
+            if (kill(old_pid, 0) != 0) break;
+        }
+
+        if (kill(old_pid, 0) == 0) {
+            logmsg("previous instance did not exit, sending SIGKILL");
+            kill(old_pid, SIGKILL);
+            usleep(100000);
+        }
+    }
+
+    unlink(pidfile_path);
+}
+
+static void write_pidfile(void) {
+    if (!pidfile_path[0]) return;
+
+    FILE *f = fopen(pidfile_path, "w");
+    if (!f) {
+        dbg("pidfile: cannot write %s: %s", pidfile_path, strerror(errno));
+        return;
+    }
+    fprintf(f, "%d\n", getpid());
+    fclose(f);
+    atexit(remove_pidfile);
+}
+
 static pid_t daemonize(void) {
+    int pipefd[2];
+    if (pipe(pipefd) < 0) exit(EXIT_FAILURE);
+
     pid_t pid = fork();
     if (pid < 0) exit(EXIT_FAILURE);
-    if (pid > 0) return pid;
+    if (pid > 0) {
+        close(pipefd[1]);
+        pid_t daemon_pid = 0;
+        if (read(pipefd[0], &daemon_pid, sizeof(daemon_pid)) != sizeof(daemon_pid))
+            daemon_pid = 0;
+        close(pipefd[0]);
+        return daemon_pid;
+    }
+
+    close(pipefd[0]);
 
     if (setsid() < 0) exit(EXIT_FAILURE);
 
     pid = fork();
     if (pid < 0) exit(EXIT_FAILURE);
-    if (pid > 0) _exit(EXIT_SUCCESS);
+    if (pid > 0) {
+        ssize_t unused = write(pipefd[1], &pid, sizeof(pid));
+        (void)unused;
+        close(pipefd[1]);
+        _exit(EXIT_SUCCESS);
+    }
+
+    close(pipefd[1]);
 
     umask(0);
     if (chdir("/") < 0) exit(EXIT_FAILURE);
@@ -297,6 +382,9 @@ int main(int argc, char *argv[]) {
         }
     }
 
+    make_pidfile_path();
+    kill_old_instance();
+
     dpy = XOpenDisplay(NULL);
     if (!dpy) {
         fprintf(stderr, "fixclip: cannot open display\n");
@@ -334,6 +422,8 @@ int main(int argc, char *argv[]) {
             _exit(EXIT_SUCCESS);
         }
     }
+
+    write_pidfile();
 
     signal(SIGTERM, handle_signal);
     signal(SIGINT, handle_signal);
