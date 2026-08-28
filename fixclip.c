@@ -415,6 +415,8 @@ int main(int argc, char *argv[]) {
     XFixesSelectSelectionInput(dpy, win, clip_atom,
                                XFixesSetSelectionOwnerNotifyMask);
 
+    logmsg("fixclip %s built %s", GIT_HASH, BUILD_DATE);
+
     if (daemon) {
         pid_t dpid = daemonize();
         if (dpid > 0) {
