@@ -178,18 +178,27 @@ static void handle_selection_notify(XSelectionEvent *sev) {
         unsigned char *clip_data = read_property(prop_clip_read, &clip_len);
 
         if (clip_data && clip_len > 0) {
-            free(primary_data);
-            primary_data = clip_data;
-            primary_len = clip_len;
+            if (old_primary_len == clip_len &&
+                memcmp(old_primary_data, clip_data, clip_len) == 0) {
+                dbg("sync: PRIMARY already matches CLIPBOARD, skipping");
+                char preview[81];
+                make_preview(clip_data, clip_len, preview, sizeof(preview));
+                logmsg("SKIP  PRIMARY already matches CLIPBOARD: \"%s\"", preview);
+                free(clip_data);
+            } else {
+                free(primary_data);
+                primary_data = clip_data;
+                primary_len = clip_len;
 
-            XSetSelectionOwner(dpy, primary_atom, win, CurrentTime);
-            XFlush(dpy);
+                XSetSelectionOwner(dpy, primary_atom, win, CurrentTime);
+                XFlush(dpy);
 
-            char old_preview[81], new_preview[81];
-            make_preview(old_primary_data, old_primary_len, old_preview, sizeof(old_preview));
-            make_preview(clip_data, clip_len, new_preview, sizeof(new_preview));
+                char old_preview[81], new_preview[81];
+                make_preview(old_primary_data, old_primary_len, old_preview, sizeof(old_preview));
+                make_preview(clip_data, clip_len, new_preview, sizeof(new_preview));
 
-            logmsg("SYNC  PRIMARY: \"%s\" → \"%s\"", old_preview, new_preview);
+                logmsg("SYNC  PRIMARY: \"%s\" → \"%s\"", old_preview, new_preview);
+            }
         } else {
             dbg("sync: CLIPBOARD empty, skipping");
             if (clip_data) free(clip_data);
